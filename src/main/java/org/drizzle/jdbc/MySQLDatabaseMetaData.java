@@ -24,11 +24,12 @@
 
 package org.drizzle.jdbc;
 
-import org.drizzle.jdbc.internal.SQLExceptionMapper;
 import java.sql.DatabaseMetaData;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+
+import org.drizzle.jdbc.internal.SQLExceptionMapper;
 
 public final class MySQLDatabaseMetaData extends CommonDatabaseMetaData {
     public MySQLDatabaseMetaData(CommonDatabaseMetaData.Builder builder) {
@@ -44,10 +45,10 @@ public final class MySQLDatabaseMetaData extends CommonDatabaseMetaData {
                 "ordinal_position KEY_SEQ," +
                 "null pk_name " +
                 "FROM information_schema.columns " +
-                "WHERE table_name='" + table + "' AND column_key='PRI'";
+                "WHERE table_name like '" + table + "' AND column_key='PRI'";
 
         if (schema != null) {
-            query += " AND table_schema = '" + schema + "'";
+            query += " AND table_schema like '" + schema + "'";
         }
         query += " ORDER BY column_name";
         final Statement stmt = getConnection().createStatement();
