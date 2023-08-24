@@ -363,9 +363,9 @@ public class MySQLProtocol implements Protocol {
             // then just try to create the database and to use it
             if (createDB()) {
                 // Try to create the database if it does not exist
-                executeQuery(new DrizzleQuery("CREATE DATABASE IF NOT EXISTS " + this.database));
+                executeQuery(new DrizzleQuery("CREATE DATABASE IF NOT EXISTS `" + this.database + "`"));
                 // and switch to this database
-                executeQuery(new DrizzleQuery("USE " + this.database));
+                executeQuery(new DrizzleQuery("USE `" + this.database + "`"));
             }
 
             // Read max_allowed_packet from server
