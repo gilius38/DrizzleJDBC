@@ -31,7 +31,7 @@ import java.util.regex.Pattern;
  * Settings | File Templates.
  */
 public enum SupportedDatabases {
-    MYSQL("MySQL"), DRIZZLE("Drizzle");
+    MYSQL("MySQL"), DRIZZLE("Drizzle"), MARIADB("MariaDB");
     private final String databaseName;
     private static final Pattern drizzlePattern = Pattern.compile("^201\\d\\..*"); //will work for 9 years atleast!
 
@@ -46,6 +46,8 @@ public enum SupportedDatabases {
     public static SupportedDatabases fromVersionString(String version) {
         if(drizzlePattern.matcher(version).matches())
             return SupportedDatabases.DRIZZLE;
+        if(version.contains("MariaDB"))
+            return MARIADB;
         return SupportedDatabases.MYSQL;
     }
 }
