@@ -492,7 +492,8 @@ public class MySQLProtocol implements Protocol {
                 return new DrizzleQueryResult(columnInformation, valueObjects, eofPacket.getWarningCount());
             }
 
-            if (getDatabaseType() == SupportedDatabases.MYSQL) {
+            if (getDatabaseType() == SupportedDatabases.MYSQL
+                    || getDatabaseType() == SupportedDatabases.MARIADB) {
                 final MySQLRowPacket rowPacket = new MySQLRowPacket(rawPacket, columnInformation);
                 valueObjects.add(rowPacket.getRow(packetFetcher));
             } else {
@@ -1155,7 +1156,8 @@ public class MySQLProtocol implements Protocol {
      */
     public void setCatalog(String catalog) throws QueryException
     {
-        if (getDatabaseType() == SupportedDatabases.MYSQL)
+        if (getDatabaseType() == SupportedDatabases.MYSQL
+                || getDatabaseType() == SupportedDatabases.MARIADB)
         {
             executeQuery(new DrizzleQuery("USE `" + catalog + "`"));
             this.database = catalog;
@@ -1172,7 +1174,8 @@ public class MySQLProtocol implements Protocol {
      */
     public String getCatalog() throws QueryException
     {
-        if (getDatabaseType() == SupportedDatabases.MYSQL)
+        if (getDatabaseType() == SupportedDatabases.MYSQL
+                || getDatabaseType() == SupportedDatabases.MARIADB)
         {
             return getDatabase();
         }

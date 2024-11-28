@@ -2768,7 +2768,9 @@ public abstract class CommonDatabaseMetaData implements DatabaseMetaData {
         public CommonDatabaseMetaData build() {
             switch(database) {
                 case DRIZZLE: return new DrizzleDataBaseMetaData(this);
-                case MYSQL: return new MySQLDatabaseMetaData(this);
+                case MYSQL:
+                case MARIADB:
+                    return new MySQLDatabaseMetaData(this);
             }
             //return new CommonDatabaseMetaData(this);
             throw new IllegalArgumentException("Unsupported database "+database);
