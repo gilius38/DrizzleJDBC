@@ -4,7 +4,7 @@
     <artifactId>drizzle-jdbc</artifactId>
     <packaging>jar</packaging>
     <name>Drizzle-JDBC</name>
-    <version>1.5.20-SNAPSHOT</version>
+    <version>1.5.21-SNAPSHOT</version>
     <description>BSD Licensed JDBC driver for Drizzle and MySQL</description>
     <url>https://github.com/krummas/DrizzleJDBC</url>
     <properties>
@@ -155,7 +155,7 @@
               <configuration>
                 <sourceEncoding>utf-8</sourceEncoding>
                 <minimumTokens>100</minimumTokens>
-                <targetJdk>1.6</targetJdk>
+                <targetJdk>8</targetJdk>
               </configuration>
             </plugin>
             <plugin>
