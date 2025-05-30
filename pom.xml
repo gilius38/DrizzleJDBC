@@ -9,6 +9,8 @@
     <url>https://github.com/krummas/DrizzleJDBC</url>
     <properties>
       <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+      <maven.compiler.target>1.8</maven.compiler.target>
+      <maven.compiler.source>1.8</maven.compiler.source>
     </properties>
     <licenses>
         <license>
@@ -155,7 +157,7 @@
               <configuration>
                 <sourceEncoding>utf-8</sourceEncoding>
                 <minimumTokens>100</minimumTokens>
-                <targetJdk>8</targetJdk>
+                <targetJdk>1.8</targetJdk>
               </configuration>
             </plugin>
             <plugin>
