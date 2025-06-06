@@ -145,11 +145,6 @@ public class MySQLProtocol implements Protocol {
     private String mysqlPublicKey;
     private boolean allowMultiQueries;
     private boolean stripQueryComments;
-    private KeyStore keyStore = null;
-    private KeyManager[] keyManagers = null;
-    private TrustManager[] trustManagers = null;
-    SSLContext context = null;
-    String[] enabledProtocols = null;
 
     /**
      * Get a protocol instance
@@ -178,7 +173,23 @@ public class MySQLProtocol implements Protocol {
         MySQLGreetingReadPacket greetingPacket = null;
         Set<MySQLServerCapabilities> capabilities = null;
         SSLSocketFactory sslSocketFactory = null;
+        KeyStore keyStore = null;
+        KeyManager[] keyManagers = null;
+        TrustManager[] trustManagers = null;
+        SSLContext context = null;
+        Enumeration<String> aliases = null;
         boolean retry = false;
+        String previousAlias = null;
+
+        // Provide a way to enable a given set of SSL protocols through
+        // comma-no-space list in the URL parameter
+        String[] enabledProtocols = new String[] { "TLSv1.3", "TLSv1.2", "TLSv1.1", "TLSv1" };
+        if (info.getProperty("enabledProtocols") != null) {
+            // no additional check: it's of user's responsibility to
+            // provide a well formed list
+            enabledProtocols = info.getProperty("enabledProtocols").split(",");
+        }
+
         do {
             packetSeq = 1;
             greetingPacket = plainConnect();
@@ -192,25 +203,15 @@ public class MySQLProtocol implements Protocol {
             }
             if (ssl) {
                 try {
-                    // Provide a way to enable a given set of SSL protocols through
-                    // comma-no-space list in the URL parameter
-                    enabledProtocols = new String[] { "TLSv1.3", "TLSv1.2", "TLSv1.1", "TLSv1" };
-                    if (info.getProperty("enabledProtocols") != null) {
-                        // no additional check: it's of user's responsibility to
-                        // provide a well formed list
-                        enabledProtocols = info.getProperty("enabledProtocols").split(",");
-                    }
                     packetSeq++;
                     AbbreviatedMySQLClientAuthPacket amcap = new AbbreviatedMySQLClientAuthPacket(capabilities);
                     amcap.send(writer);
-                    if (sslConnectSuccessful(sslSocketFactory)) {
+                    if (sslConnectSuccessful(sslSocketFactory, enabledProtocols)) {
                         if (log.isLoggable(Level.FINE) && sslSocketFactory == null)
                             log.fine("First alias succeeded");
                         retry = false;
                     }
                     else {
-                        Enumeration<String> aliases = null;
-                        String previousAlias = null;
                         try {
                             writer.close();
                         } catch (Exception ignored) {
@@ -243,8 +244,6 @@ public class MySQLProtocol implements Protocol {
                                 tmFact.init(ts);
                                 trustManagers = tmFact.getTrustManagers();
                                 aliases = keyStore.aliases();
-                                // first alias already tried, skip
-                                previousAlias = aliases.nextElement();
                                 if (!aliases.hasMoreElements()) {
                                     throw new QueryException(
                                             "Could not connect, did not find additional aliases to try");
@@ -263,9 +262,6 @@ public class MySQLProtocol implements Protocol {
                             }
                             aliasBeingTried = aliases.nextElement();
                             retry = true;
-                            if (log.isLoggable(Level.INFO))
-                                log.info("Could not connect with alias '" + previousAlias
-                                        + "', will try with next alias '" + aliasBeingTried + "'");
                             previousAlias = aliasBeingTried;
                             // that's where we force the use of our home-made alias selector
                             for (int i = 0; i < keyManagers.length; i++) {
@@ -417,7 +413,7 @@ public class MySQLProtocol implements Protocol {
      * @throws IOException
      * @throws QueryException
      */
-    public boolean sslConnectSuccessful(SSLSocketFactory sslSocketFactory)
+    public boolean sslConnectSuccessful(SSLSocketFactory sslSocketFactory, String[] enabledProtocols)
             throws IOException, QueryException {
         if (sslSocketFactory == null && info.getProperty("serverCertificate") != null) {
             File certificate = new File(info.getProperty("serverCertificate"));
