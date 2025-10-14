@@ -42,137 +42,132 @@ public class StringParameter implements ParameterHolder {
     private final byte[] byteRepresentation;
 
     private final boolean fullyBuffered;
-	private final int bytesLength;
-		
-	// Shared encoding state fields
-	private CharsetEncoder encoder;
-	private CharBuffer charBuffer;
-	private ByteBuffer byteBuffer;
-	private boolean streamDone = false;
+    private final int bytesLength;
 
-	// buffer size
-	private static final int BUFFER_SIZE = 32768;
+    // Shared encoding state fields
+    private CharsetEncoder encoder;
+    private CharBuffer charBuffer;
+    private ByteBuffer byteBuffer;
+    private boolean streamDone = false;
 
-	public StringParameter(final String parameter) {
-		String param = "'" + sqlEscapeString(parameter) + "'";
-		
-		// For small strings, keep old behavior
-		if(param.length() <= BUFFER_SIZE)
-		{
-	        try {
-	            this.byteRepresentation = param.getBytes("UTF-8");
-	            this.bytesLength = this.byteRepresentation.length;
-	            fullyBuffered = true;
-	        } catch (UnsupportedEncodingException e) {
-	            throw new RuntimeException("Unsupported encoding: " + e.getMessage(), e);
-	        }
-		}
-		else
-		{
-			fullyBuffered = false;
-			this.byteRepresentation = null;
-			encoder = StandardCharsets.UTF_8.newEncoder();
-			charBuffer = CharBuffer.wrap(param);
-			byteBuffer = ByteBuffer.allocate(BUFFER_SIZE);
-			try {
-				this.bytesLength = countBytesInternal();
-			} catch (CharacterCodingException e) {
-				throw new RuntimeException("Unsupported encoding: " + e.getMessage(), e);
-			}
-			resetEncoderBuffers();
-		}
-	}
+    // buffer size
+    private static final int BUFFER_SIZE = 32768;
 
-	/**
-	 * Resets all encoding state fields for a fresh write. Safe to call between streaming writes or after counting bytes.
-	 */
-	private void resetEncoderBuffers() {
-		encoder.reset();
-		charBuffer.position(0);
-		byteBuffer.clear();
-		byteBuffer.flip();
-		streamDone = false;
-	}
+    public StringParameter(final String parameter) {
+        final String param = "'" + sqlEscapeString(parameter) + "'";
 
-	/**
-	 * Byte counting and size calculation use the shared buffers for efficiency.
-	 */
-	private int countBytesInternal() throws CharacterCodingException {
-		int totalBytes = 0;
-		while (charBuffer.hasRemaining()) {
-			encoder.encode(charBuffer, byteBuffer, true);			
-			totalBytes += byteBuffer.position();
-			byteBuffer.clear();
-		}
-		encoder.flush(byteBuffer);
-		totalBytes += byteBuffer.position();
-		return totalBytes;
-	}
+        // For small strings, keep old behavior
+        if (param.length() <= BUFFER_SIZE) {
+            try {
+                this.byteRepresentation = param.getBytes("UTF-8");
+                this.bytesLength = this.byteRepresentation.length;
+                fullyBuffered = true;
+            } catch (UnsupportedEncodingException e) {
+                throw new RuntimeException("Unsupported encoding: " + e.getMessage(), e);
+            }
+        } else {
+            fullyBuffered = false;
+            this.byteRepresentation = null;
+            encoder = StandardCharsets.UTF_8.newEncoder();
+            charBuffer = CharBuffer.wrap(param);
+            byteBuffer = ByteBuffer.allocate(BUFFER_SIZE);
+            try {
+                this.bytesLength = countBytesInternal();
+            } catch (CharacterCodingException e) {
+                throw new RuntimeException("Unsupported encoding: " + e.getMessage(), e);
+            }
+            resetEncoderBuffers();
+        }
+    }
 
-	/**
-	 * Returns total size in bytes.
-	 */
-	public long length() {
-		return bytesLength;
-	}
+    /**
+     * Resets all encoding state fields for a fresh write. Safe to call between
+     * streaming writes or after counting bytes.
+     */
+    private void resetEncoderBuffers() {
+        encoder.reset();
+        charBuffer.position(0);
+        byteBuffer.clear();
+        byteBuffer.flip();
+        streamDone = false;
+    }
 
-	/**
-	 * Efficient streaming implementation that resumes writing across calls.
-	 * After a full write, call resetEncoderBuffers() to reuse from the beginning.
-	 */
-	public int writeTo(final OutputStream os, int offset, int maxWriteSize) throws IOException {
-		if(fullyBuffered)
-		{
-			int bytesToWrite = Math.min(byteRepresentation.length - offset, maxWriteSize);
-			os.write(byteRepresentation, offset, bytesToWrite);
-			return bytesToWrite;
-		}
-		else
-		{
-			/**
-			 * Efficient streaming implementation that resumes writing across calls. After a
-			 * full write, call resetEncoderBuffers() to reuse from the beginning. Note that
-			 * here, offset is useless, since the offset is kept by the byteBuffer position.
-			 * The length however is used to compute how many bytes should be sent to the
-			 * protocol.
-			 */
-			if (streamDone)
-				return 0;
-			int totalBytesWritten = 0;
-			int bytesToWrite = 0;
-			int bufferRemaining = byteBuffer.remaining();
+    /**
+     * Byte counting and size calculation use the shared buffers for efficiency.
+     */
+    private int countBytesInternal() throws CharacterCodingException {
+        int totalBytes = 0;
+        while (charBuffer.hasRemaining()) {
+            encoder.encode(charBuffer, byteBuffer, true);
+            totalBytes += byteBuffer.position();
+            byteBuffer.clear();
+        }
+        encoder.flush(byteBuffer);
+        totalBytes += byteBuffer.position();
+        return totalBytes;
+    }
 
-			// If the previously read buffer was not fully sent (split across several
-			// packets), first send the remaining bytes from buffer before reading more
-			// bytes to send
-			if (bufferRemaining > 0) {
-				bytesToWrite = Math.min(bufferRemaining, maxWriteSize - totalBytesWritten);
-				os.write(byteBuffer.array(), byteBuffer.position(), bytesToWrite);
-				totalBytesWritten += bytesToWrite;
+    /**
+     * Returns total size in bytes.
+     */
+    public long length() {
+        return bytesLength;
+    }
 
-				if (totalBytesWritten >= maxWriteSize) {
-					// Stream is done once there is nothing left in charBuffer or in byteBuffer
-					streamDone = !charBuffer.hasRemaining() && !byteBuffer.hasRemaining();
-					return totalBytesWritten;
-				}
-			}
-			// Everything was sent so far, get more data from input and send it
-			while (!streamDone && charBuffer.hasRemaining()) {
-				byteBuffer.clear();
-				encoder.encode(charBuffer, byteBuffer, true);
-				byteBuffer.flip();
-				bufferRemaining = byteBuffer.remaining();
-				bytesToWrite = Math.min(bufferRemaining, maxWriteSize - totalBytesWritten);
-				os.write(byteBuffer.array(), byteBuffer.position(), bytesToWrite);
-				byteBuffer.position(byteBuffer.position() + bytesToWrite);
-				totalBytesWritten += bytesToWrite;
-				if (totalBytesWritten >= maxWriteSize) {
-					break;
-				}
-			}
-			// Stream is done once there is nothing left in charBuffer or in byteBuffer
-			streamDone = !charBuffer.hasRemaining() && !byteBuffer.hasRemaining();
-			return totalBytesWritten;
-		}
-	}
+    /**
+     * Efficient streaming implementation that resumes writing across calls. After a
+     * full write, call resetEncoderBuffers() to reuse from the beginning.
+     */
+    public int writeTo(final OutputStream os, int offset, int maxWriteSize) throws IOException {
+        if (fullyBuffered) {
+            int bytesToWrite = Math.min(byteRepresentation.length - offset, maxWriteSize);
+            os.write(byteRepresentation, offset, bytesToWrite);
+            return bytesToWrite;
+        } else {
+            /**
+             * Efficient streaming implementation that resumes writing across calls. After a
+             * full write, call resetEncoderBuffers() to reuse from the beginning. Note that
+             * here, offset is useless, since the offset is kept by the byteBuffer position.
+             * The length however is used to compute how many bytes should be sent to the
+             * protocol.
+             */
+            if (streamDone)
+                return 0;
+            int totalBytesWritten = 0;
+            int bytesToWrite = 0;
+            int bufferRemaining = byteBuffer.remaining();
+
+            // If the previously read buffer was not fully sent (split across several
+            // packets), first send the remaining bytes from buffer before reading more
+            // bytes to send
+            if (bufferRemaining > 0) {
+                bytesToWrite = Math.min(bufferRemaining, maxWriteSize - totalBytesWritten);
+                os.write(byteBuffer.array(), byteBuffer.position(), bytesToWrite);
+                totalBytesWritten += bytesToWrite;
+
+                if (totalBytesWritten >= maxWriteSize) {
+                    // Stream is done once there is nothing left in charBuffer or in byteBuffer
+                    streamDone = !charBuffer.hasRemaining() && !byteBuffer.hasRemaining();
+                    return totalBytesWritten;
+                }
+            }
+            // Everything was sent so far, get more data from input and send it
+            while (!streamDone && charBuffer.hasRemaining()) {
+                byteBuffer.clear();
+                encoder.encode(charBuffer, byteBuffer, true);
+                byteBuffer.flip();
+                bufferRemaining = byteBuffer.remaining();
+                bytesToWrite = Math.min(bufferRemaining, maxWriteSize - totalBytesWritten);
+                os.write(byteBuffer.array(), byteBuffer.position(), bytesToWrite);
+                byteBuffer.position(byteBuffer.position() + bytesToWrite);
+                totalBytesWritten += bytesToWrite;
+                if (totalBytesWritten >= maxWriteSize) {
+                    break;
+                }
+            }
+            // Stream is done once there is nothing left in charBuffer or in byteBuffer
+            streamDone = !charBuffer.hasRemaining() && !byteBuffer.hasRemaining();
+            return totalBytesWritten;
+        }
+    }
 }
