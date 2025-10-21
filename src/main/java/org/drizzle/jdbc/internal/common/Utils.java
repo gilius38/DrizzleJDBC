@@ -100,7 +100,9 @@ public class Utils {
         boolean neededEscaping = false;
         for (int i = 0; i < str.length(); i++) {
             final char c = str.charAt(i);
-            if (needsEscaping((byte) c)) {
+            // Only check escaping for ASCII characters (0-127)
+            // Unicode characters (>127) including emojis should pass through unchanged
+            if (c < 128 && needsEscaping((byte) c)) {
                 neededEscaping = true;
                 buffer.append('\\');
             }
