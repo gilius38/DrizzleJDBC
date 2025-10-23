@@ -1021,6 +1021,240 @@ public class StringParameterTest {
     }
 
     // ========================================================================
+    // BIG STRING TESTS WITH MAXWRITESIZE 16777215 (16MB - 1)
+    // ========================================================================
+
+    @Test
+    public void testBigStringExactlyAtMaxWriteSize() throws IOException {
+        System.out.println(">>> Running: testBigStringExactlyAtMaxWriteSize");
+        int maxWriteSize = 16777215;
+
+        // Create a string that will be exactly 16777215 bytes after escaping (including quotes)
+        // 16777215 - 2 (for quotes) = 16777213 bytes
+        String input = createString('X', 16777213);
+        StringParameter param = new StringParameter(input);
+
+        assertEquals("Should be exactly maxWriteSize", maxWriteSize, param.length());
+
+        // Write in one go with maxWriteSize
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        int written = param.writeTo(baos, 0, maxWriteSize);
+
+        assertEquals("Should write all bytes at once", maxWriteSize, written);
+        assertEquals("'" + input + "'", baos.toString("UTF-8"));
+    }
+
+    @Test
+    public void testBigStringJustBelowMaxWriteSize() throws IOException {
+        System.out.println(">>> Running: testBigStringJustBelowMaxWriteSize");
+        int maxWriteSize = 16777215;
+
+        // Create a string just below the limit (16777214 bytes total with quotes)
+        String input = createString('Y', 16777212);
+        StringParameter param = new StringParameter(input);
+
+        assertEquals("Should be just below maxWriteSize", 16777214, param.length());
+
+        // Write with maxWriteSize
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        int written = param.writeTo(baos, 0, maxWriteSize);
+
+        assertEquals("Should write all bytes", param.length(), written);
+        String result = baos.toString("UTF-8");
+        assertEquals("'" + input + "'", result);
+    }
+
+    @Test
+    public void testBigStringWellAboveMaxWriteSize() throws IOException {
+        System.out.println(">>> Running: testBigStringWellAboveMaxWriteSize");
+        int maxWriteSize = 16777215;
+
+        // Create a much larger string (20MB worth of characters)
+        String input = createString('Z', 20000000);
+        StringParameter param = new StringParameter(input);
+
+        assertTrue("Should be well above maxWriteSize", param.length() > maxWriteSize);
+
+        // Write in chunks using maxWriteSize
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        long totalWritten = 0;
+        int writeCount = 0;
+
+        while (totalWritten < param.length()) {
+            int written = param.writeTo(baos, 0, maxWriteSize);
+            if (written == 0) break;
+            totalWritten += written;
+            writeCount++;
+
+            // Each write should be at most maxWriteSize
+            assertTrue("Each write should be <= maxWriteSize", written <= maxWriteSize);
+        }
+
+        assertEquals("Should write all bytes", param.length(), totalWritten);
+        System.out.println("Wrote " + totalWritten + " bytes in " + writeCount + " writes");
+
+        // Verify correctness
+        String result = baos.toString("UTF-8");
+        assertTrue("Should start with quote", result.startsWith("'"));
+        assertTrue("Should end with quote", result.endsWith("'"));
+        assertEquals("Content should match", input, result.substring(1, result.length() - 1));
+    }
+
+    @Test
+    public void testBigStringWithEscapingAtMaxWriteSize() throws IOException {
+        System.out.println(">>> Running: testBigStringWithEscapingAtMaxWriteSize");
+        int maxWriteSize = 16777215;
+
+        // Create a string with characters that need escaping
+        // Each iteration adds 6 chars that become 12 bytes after escaping: '\'"
+        // Let's create about 8MB worth before escaping
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < 1400000; i++) {
+            sb.append("'\\\"");  // These characters need escaping
+        }
+        String input = sb.toString();
+
+        StringParameter param = new StringParameter(input);
+        System.out.println("String length after escaping: " + param.length() + " bytes");
+
+        // Write using maxWriteSize chunks
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        long totalWritten = 0;
+        int writeCount = 0;
+
+        while (totalWritten < param.length()) {
+            int written = param.writeTo(baos, 0, maxWriteSize);
+            if (written == 0) break;
+            totalWritten += written;
+            writeCount++;
+
+            assertTrue("Each write should be <= maxWriteSize", written <= maxWriteSize);
+        }
+
+        assertEquals("Should write all bytes", param.length(), totalWritten);
+        System.out.println("Wrote " + totalWritten + " bytes in " + writeCount + " writes");
+
+        // Verify escaping is correct
+        String result = baos.toString("UTF-8");
+        assertTrue("Should contain escaped quotes", result.contains("\\'"));
+        assertTrue("Should contain escaped backslashes", result.contains("\\\\"));
+        assertTrue("Should contain escaped double quotes", result.contains("\\\""));
+    }
+
+    @Test
+    public void testBigStringWithUnicodeAtMaxWriteSize() throws IOException {
+        System.out.println(">>> Running: testBigStringWithUnicodeAtMaxWriteSize");
+        int maxWriteSize = 16777215;
+
+        // Create a large string with multi-byte UTF-8 characters
+        StringBuilder sb = new StringBuilder();
+        // Mix of 1-byte, 2-byte, 3-byte, and 4-byte UTF-8 sequences
+        for (int i = 0; i < 1000000; i++) {
+            sb.append("Hello");     // 1-byte chars
+            sb.append("Café");      // 2-byte char (é)
+            sb.append("世界");      // 3-byte chars
+            sb.append("🌍");        // 4-byte char
+        }
+        String input = sb.toString();
+
+        StringParameter param = new StringParameter(input);
+        System.out.println("String length with UTF-8: " + param.length() + " bytes");
+
+        // Write using maxWriteSize chunks
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        long totalWritten = 0;
+        int writeCount = 0;
+
+        while (totalWritten < param.length()) {
+            int written = param.writeTo(baos, 0, maxWriteSize);
+            if (written == 0) break;
+            totalWritten += written;
+            writeCount++;
+
+            assertTrue("Each write should be <= maxWriteSize", written <= maxWriteSize);
+        }
+
+        assertEquals("Should write all bytes", param.length(), totalWritten);
+        System.out.println("Wrote " + totalWritten + " bytes in " + writeCount + " writes");
+
+        // Verify UTF-8 encoding is correct
+        String result = baos.toString("UTF-8");
+        assertTrue("Should contain emoji", result.contains("🌍"));
+        assertTrue("Should contain Chinese characters", result.contains("世界"));
+        assertTrue("Should contain accented character", result.contains("Café"));
+        assertEquals("Content should match", "'" + input + "'", result);
+    }
+
+    @Test
+    public void testBigStringMultipleMaxWriteSizeChunks() throws IOException {
+        System.out.println(">>> Running: testBigStringMultipleMaxWriteSizeChunks");
+        int maxWriteSize = 16777215;
+
+        // Create a string that requires exactly 3 full writes at maxWriteSize
+        // 3 * 16777215 = 50331645 bytes, minus 2 for quotes = 50331643 chars
+        String input = createString('M', 50331643);
+        StringParameter param = new StringParameter(input);
+
+        assertEquals("Should be exactly 3x maxWriteSize", 3L * maxWriteSize, param.length());
+
+        // Write in maxWriteSize chunks
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        long totalWritten = 0;
+        int writeCount = 0;
+
+        while (totalWritten < param.length()) {
+            int written = param.writeTo(baos, 0, maxWriteSize);
+            if (written == 0) break;
+            totalWritten += written;
+            writeCount++;
+        }
+
+        assertEquals("Should write all bytes", param.length(), totalWritten);
+        assertEquals("Should require exactly 3 writes", 3, writeCount);
+
+        // Verify correctness
+        String result = baos.toString("UTF-8");
+        assertEquals("'" + input + "'", result);
+    }
+
+    @Test
+    public void testBigStringPerformanceWithMaxWriteSize() throws IOException {
+        System.out.println(">>> Running: testBigStringPerformanceWithMaxWriteSize");
+        int maxWriteSize = 16777215;
+
+        // Test with 100MB string
+        String input = createString('P', 100000000);
+        StringParameter param = new StringParameter(input);
+
+        System.out.println("Testing with " + param.length() + " bytes");
+
+        long startTime = System.nanoTime();
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        long totalWritten = 0;
+        int writeCount = 0;
+
+        while (totalWritten < param.length()) {
+            int written = param.writeTo(baos, 0, maxWriteSize);
+            if (written == 0) break;
+            totalWritten += written;
+            writeCount++;
+        }
+
+        long elapsed = System.nanoTime() - startTime;
+
+        assertEquals("Should write all bytes", param.length(), totalWritten);
+        System.out.println("Wrote " + totalWritten + " bytes in " + writeCount +
+                          " writes using maxWriteSize=" + maxWriteSize);
+        System.out.println("Time elapsed: " + (elapsed / 1_000_000) + "ms");
+        System.out.println("Throughput: " + (totalWritten / 1024 / 1024) / (elapsed / 1_000_000_000.0) + " MB/s");
+
+        // Verify correctness (just check start and end)
+        String result = baos.toString("UTF-8");
+        assertTrue("Should start with quote", result.startsWith("'"));
+        assertTrue("Should end with quote", result.endsWith("'"));
+    }
+
+    // ========================================================================
     // HELPER METHODS
     // ========================================================================
 
