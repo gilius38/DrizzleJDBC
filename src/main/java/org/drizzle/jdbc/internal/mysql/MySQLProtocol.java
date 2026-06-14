@@ -122,6 +122,12 @@ public class MySQLProtocol implements Protocol {
     private final static Logger log = Logger.getLogger(MySQLProtocol.class.getName());
     private static final int MAX_DEFAULT_PACKET_LENGTH = 0x00FFFFFF;
 
+    // CT-2779: keystore properties for the client-cert alias walk.
+    private static final String KEYSTORE_PROP = "javax.net.ssl.keyStore";
+    private static final String KEYSTORE_PASSWORD_PROP = "javax.net.ssl.keyStorePassword";
+    private static final String TRUSTSTORE_PROP = "javax.net.ssl.trustStore";
+    private static final String TRUSTSTORE_PASSWORD_PROP = "javax.net.ssl.trustStorePassword";
+
     private boolean connected = false;
     private Socket socket;
     private BufferedOutputStream writer;
@@ -190,104 +196,215 @@ public class MySQLProtocol implements Protocol {
             enabledProtocols = info.getProperty("enabledProtocols").split(",");
         }
 
-        do {
-            packetSeq = 1;
-            greetingPacket = plainConnect();
-            capabilities = extractInfosFromGreetingPacket(greetingPacket);
-            if (capabilities.contains(MySQLServerCapabilities.SSL)) {
-                ssl = true;
-            } else if (info.getProperty("useSSL") != null) {
-                throw new QueryException("Trying to connect with ssl, but ssl not enabled in the server");
-            } else {
-                ssl = false;
-            }
-            if (ssl) {
-                try {
-                    packetSeq++;
-                    AbbreviatedMySQLClientAuthPacket amcap = new AbbreviatedMySQLClientAuthPacket(capabilities);
-                    amcap.send(writer);
-                    if (sslConnectSuccessful(sslSocketFactory, enabledProtocols)) {
-                        if (log.isLoggable(Level.FINE) && sslSocketFactory == null)
-                            log.fine("First alias succeeded");
-                        retry = false;
-                    }
-                    else {
-                        try {
-                            writer.close();
-                        } catch (Exception ignored) {
-                        }
-                        try {
-                            packetFetcher.close();
-                        } catch (Exception ignored) {
-                        }
-                        try {
-                            socket.close();
-                        } catch (Exception ignored) {
-                        }
-                        // load keystore to get the aliases, only once
-                        if (keyStore == null) {
-                            try {
-                                // both key and trust stores will be needed to init the ssl context
-                                KeyManagerFactory kmFact = KeyManagerFactory
-                                        .getInstance(KeyManagerFactory.getDefaultAlgorithm());
-                                keyStore = KeyStore.getInstance("jks");
-                                FileInputStream fis = new FileInputStream(System.getProperty("javax.net.ssl.keyStore"));
-                                keyStore.load(fis, System.getProperty("javax.net.ssl.keyStorePassword").toCharArray());
-                                kmFact.init(keyStore,
-                                        System.getProperty("javax.net.ssl.keyStorePassword").toCharArray());
-                                keyManagers = kmFact.getKeyManagers();
-                                TrustManagerFactory tmFact = TrustManagerFactory
-                                        .getInstance(TrustManagerFactory.getDefaultAlgorithm());
-                                KeyStore ts = KeyStore.getInstance("jks");
-                                fis = new FileInputStream(System.getProperty("javax.net.ssl.trustStore"));
-                                ts.load(fis, System.getProperty("javax.net.ssl.trustStorePassword").toCharArray());
-                                tmFact.init(ts);
-                                trustManagers = tmFact.getTrustManagers();
-                                aliases = keyStore.aliases();
-                                if (!aliases.hasMoreElements()) {
-                                    throw new QueryException(
-                                            "Could not connect, did not find additional aliases to try");
-                                }
-                            } catch (KeyStoreException | NoSuchAlgorithmException | CertificateException
-                                    | UnrecoverableKeyException | IOException e) {
-                                throw new QueryException(
-                                        "Could not connect - error loading keystores to read aliases" + e.getMessage(),
-                                        -1, SQLExceptionMapper.SQLStates.CONNECTION_EXCEPTION.getSqlState(), e);
-                            }
-                        }
-                        String aliasBeingTried = null;
-                        try {
-                            if (!aliases.hasMoreElements()) {
-                                throw new QueryException("Could not connect, all keystore aliases found have already been tried");
-                            }
-                            aliasBeingTried = aliases.nextElement();
-                            retry = true;
-                            previousAlias = aliasBeingTried;
-                            // that's where we force the use of our home-made alias selector
-                            for (int i = 0; i < keyManagers.length; i++) {
-                                if (keyManagers[i] instanceof X509KeyManager) {
-                                    keyManagers[i] = new AliasSelectorKeyManager((X509KeyManager) keyManagers[i],
-                                            aliasBeingTried);
-                                }
-                            }
-                            // Use the first protocol in SSLContext - the fact that there may be
-                            // multiple configured protocols is not handled here;
-                            // SSLContext.getInstance only takes one
-                            context = SSLContext.getInstance(enabledProtocols[0]);
-                            context.init(keyManagers, trustManagers, null);
-                            sslSocketFactory = context.getSocketFactory();
-                        } catch (NoSuchAlgorithmException | KeyManagementException e) {
-                            throw new QueryException("Could not load key store "
-                                    + System.getProperty("javax.net.ssl.keyStore") + e.getLocalizedMessage());
-                        }
-                    } /* !sslConnectSuccessful */
-                } catch (IOException e) {
-                    throw new QueryException("Could not connect: " + e.getMessage(), -1,
-                            SQLExceptionMapper.SQLStates.CONNECTION_EXCEPTION.getSqlState(), e);
+        // CT-2779: close the socket on any throw that aborts the constructor.
+        boolean connectComplete = false;
+        try {
+            do {
+                packetSeq = 1;
+                greetingPacket = plainConnect();
+                capabilities = extractInfosFromGreetingPacket(greetingPacket);
+                if (capabilities.contains(MySQLServerCapabilities.SSL)) {
+                    ssl = true;
+                } else if (info.getProperty("useSSL") != null) {
+                    throw new QueryException("Trying to connect with ssl, but ssl not enabled in the server");
+                } else {
+                    ssl = false;
                 }
-            } /* if ssl */
-        } while (retry);
-        authenticate(greetingPacket, capabilities, packetSeq);
+                if (ssl) {
+                    try {
+                        packetSeq++;
+                        AbbreviatedMySQLClientAuthPacket amcap = new AbbreviatedMySQLClientAuthPacket(capabilities);
+                        amcap.send(writer);
+                        boolean aliasWorks = false;
+                        if (sslConnectSuccessful(sslSocketFactory, enabledProtocols)) {
+                            // CT-2779: under TLS 1.3 a rejected client cert isn't
+                            // reported by startHandshake() - it breaks the first
+                            // auth exchange. Run it here so a transport break tries
+                            // the next alias; a real auth/DB error is rethrown.
+                            try {
+                                authenticate(greetingPacket, capabilities, packetSeq);
+                                aliasWorks = true;
+                            } catch (QueryException qe) {
+                                boolean moreAliasesToTry = hasAnotherAliasToTry(
+                                        aliases, System.getProperty(KEYSTORE_PROP) != null);
+                                // not a cert break, or no alias left: surface it
+                                if (!(isLateCertRejection(qe) && moreAliasesToTry))
+                                    throw qe;
+                                if (log.isLoggable(Level.FINE))
+                                    log.fine("Auth broke right after the TLS handshake"
+                                            + (sslSocketFactory == null
+                                                    ? " (default alias)"
+                                                    : " (alias " + previousAlias + ")")
+                                            + "; treating as a rejected client"
+                                            + " certificate, trying the next alias");
+                            }
+                        }
+                        if (aliasWorks) {
+                            if (log.isLoggable(Level.FINE) && sslSocketFactory == null)
+                                log.fine("First alias succeeded");
+                            retry = false;
+                        }
+                        else {
+                            // close this socket; plainConnect() opens a fresh one
+                            closeSocketQuietly();
+                            // load keystore to get the aliases, only once
+                            if (keyStore == null) {
+                                String keyStorePath = System.getProperty(KEYSTORE_PROP);
+                                String trustStorePath = System.getProperty(TRUSTSTORE_PROP);
+                                // CT-2779: clear error instead of FileInputStream(null) NPE
+                                requireAliasKeystorePaths(keyStorePath, trustStorePath);
+                                // passwords optional: null is accepted, a wrong one
+                                // surfaces through the catch below
+                                char[] keyStorePassword = toPassword(
+                                        System.getProperty(KEYSTORE_PASSWORD_PROP));
+                                char[] trustStorePassword = toPassword(
+                                        System.getProperty(TRUSTSTORE_PASSWORD_PROP));
+                                try {
+                                    // both key and trust stores will be needed to init the ssl context
+                                    KeyManagerFactory kmFact = KeyManagerFactory
+                                            .getInstance(KeyManagerFactory.getDefaultAlgorithm());
+                                    keyStore = KeyStore.getInstance("jks");
+                                    FileInputStream fis = new FileInputStream(keyStorePath);
+                                    keyStore.load(fis, keyStorePassword);
+                                    kmFact.init(keyStore, keyStorePassword);
+                                    keyManagers = kmFact.getKeyManagers();
+                                    TrustManagerFactory tmFact = TrustManagerFactory
+                                            .getInstance(TrustManagerFactory.getDefaultAlgorithm());
+                                    KeyStore ts = KeyStore.getInstance("jks");
+                                    fis = new FileInputStream(trustStorePath);
+                                    ts.load(fis, trustStorePassword);
+                                    tmFact.init(ts);
+                                    trustManagers = tmFact.getTrustManagers();
+                                    aliases = keyStore.aliases();
+                                    if (!aliases.hasMoreElements()) {
+                                        throw new QueryException(
+                                                "Could not connect, did not find additional aliases to try");
+                                    }
+                                } catch (KeyStoreException | NoSuchAlgorithmException | CertificateException
+                                        | UnrecoverableKeyException | IOException e) {
+                                    throw new QueryException(
+                                            "Could not connect - error loading keystores to read aliases" + e.getMessage(),
+                                            -1, SQLExceptionMapper.SQLStates.CONNECTION_EXCEPTION.getSqlState(), e);
+                                }
+                            }
+                            String aliasBeingTried = null;
+                            try {
+                                if (!aliases.hasMoreElements()) {
+                                    throw new QueryException("Could not connect, all keystore aliases found have already been tried");
+                                }
+                                aliasBeingTried = aliases.nextElement();
+                                retry = true;
+                                previousAlias = aliasBeingTried;
+                                // that's where we force the use of our home-made alias selector
+                                for (int i = 0; i < keyManagers.length; i++) {
+                                    if (keyManagers[i] instanceof X509KeyManager) {
+                                        keyManagers[i] = new AliasSelectorKeyManager((X509KeyManager) keyManagers[i],
+                                                aliasBeingTried);
+                                    }
+                                }
+                                // Use the first protocol in SSLContext - the fact that there may be
+                                // multiple configured protocols is not handled here;
+                                // SSLContext.getInstance only takes one
+                                context = SSLContext.getInstance(enabledProtocols[0]);
+                                context.init(keyManagers, trustManagers, null);
+                                sslSocketFactory = context.getSocketFactory();
+                            } catch (NoSuchAlgorithmException | KeyManagementException e) {
+                                throw new QueryException("Could not load key store "
+                                        + System.getProperty(KEYSTORE_PROP) + e.getLocalizedMessage());
+                            }
+                        } /* !sslConnectSuccessful */
+                    } catch (IOException e) {
+                        throw new QueryException("Could not connect: " + e.getMessage(), -1,
+                                SQLExceptionMapper.SQLStates.CONNECTION_EXCEPTION.getSqlState(), e);
+                    }
+                } /* if ssl */
+            } while (retry);
+            // CT-2779: the SSL path authenticated inside the loop; the non-SSL
+            // path does it here. finishConnect() runs once, outside the retry scope.
+            if (!ssl)
+                authenticate(greetingPacket, capabilities, packetSeq);
+            finishConnect();
+            connectComplete = true;
+        } finally {
+            // any throw leaves the socket open and the caller gets no object to
+            // close() - release the FD here so it is not leaked.
+            if (!connectComplete)
+                closeSocketQuietly();
+        }
+    }
+
+    /**
+     * CT-2779: close the streams and socket, ignoring errors and sending no
+     * COM_QUIT (the socket may be broken). Frees the FD when the constructor
+     * throws and the caller never gets an object to {@link #close()}.
+     */
+    private void closeSocketQuietly() {
+        try { if (writer != null) writer.close(); } catch (Exception ignored) { }
+        try { if (packetFetcher != null) packetFetcher.close(); } catch (Exception ignored) { }
+        try { if (socket != null) socket.close(); } catch (Exception ignored) { }
+    }
+
+    /**
+     * CT-2779: is a post-handshake auth failure a late TLS 1.3 client-cert
+     * rejection that another keystore alias might fix? Such a rejection isn't
+     * reported by {@code startHandshake()}; it breaks the transport (the initial
+     * auth packet or a caching_sha2/sha256 plugin exchange), and
+     * {@code authenticate()}'s {@code catch (IOException)} tags it
+     * {@code CONNECTION_EXCEPTION} ("08"). A real auth error (server ERROR packet)
+     * or a plugin {@code RuntimeException} is not "08", so it is not retried -
+     * another cert cannot fix it.
+     *
+     * @param qe the exception thrown by the post-handshake auth exchange
+     * @return true if it is a connection-level break that another alias may fix
+     */
+    static boolean isLateCertRejection(final QueryException qe) {
+        // exact "08" only (not the whole family) keeps the retry narrow;
+        // authenticate() always stamps exactly that on transport breaks
+        return SQLExceptionMapper.SQLStates.CONNECTION_EXCEPTION.getSqlState()
+                .equals(qe.getSqlState());
+    }
+
+    /**
+     * CT-2779: is there another keystore alias to try after a cert rejection?
+     * Before the keystore is loaded we only know whether one is configured;
+     * after, the alias enumeration is authoritative. False lets the original
+     * rejection propagate instead of a generic "all aliases tried".
+     *
+     * @param aliases            the keystore alias enumeration, or null if the
+     *                           keystore has not been loaded yet
+     * @param keystoreConfigured whether a keystore is configured at all
+     * @return true if a further alias attempt is possible
+     */
+    static boolean hasAnotherAliasToTry(final Enumeration<String> aliases,
+            final boolean keystoreConfigured) {
+        return aliases == null ? keystoreConfigured : aliases.hasMoreElements();
+    }
+
+    /**
+     * CT-2779: require the keystore and trust-store PATH properties for the alias
+     * walk (a null path is an uncatchable {@code FileInputStream(null)} NPE).
+     * Passwords are not required here - see {@link #toPassword(String)}.
+     *
+     * @throws QueryException if either path property is unset
+     */
+    static void requireAliasKeystorePaths(final String keyStorePath,
+            final String trustStorePath) throws QueryException {
+        if (keyStorePath == null || trustStorePath == null) {
+            throw new QueryException("Could not connect - cannot try additional"
+                    + " client-certificate aliases: the " + KEYSTORE_PROP + " and "
+                    + TRUSTSTORE_PROP + " system properties must both be set",
+                    -1, SQLExceptionMapper.SQLStates.CONNECTION_EXCEPTION.getSqlState(),
+                    null);
+        }
+    }
+
+    /**
+     * CT-2779: keystore password property to char[], mapping unset to
+     * {@code null}. The JSSE load/init APIs accept a null password (truststores
+     * often have none); a wrong-but-required password surfaces from the load.
+     */
+    static char[] toPassword(final String password) {
+        return password == null ? null : password.toCharArray();
     }
 
     public final MySQLGreetingReadPacket plainConnect() throws QueryException {
@@ -490,23 +607,30 @@ public class MySQLProtocol implements Protocol {
                 throw new QueryException("Could not connect: " + message);
             }
 
-            // At this point, the driver is connected to the database, if createDB is true,
-            // then just try to create the database and to use it
-            if (createDB()) {
-                // Try to create the database if it does not exist
-                executeQuery(new DrizzleQuery("CREATE DATABASE IF NOT EXISTS `" + this.database + "`"));
-                // and switch to this database
-                executeQuery(new DrizzleQuery("USE `" + this.database + "`"));
-            }
-
-            // Read max_allowed_packet from server
-            getMaxAllowedPacket();
-
-            connected = true;
+            // CT-2779: cert + credentials accepted here. Post-acceptance setup
+            // is in finishConnect(), outside the retry loop, so a failure there
+            // is a real error, not a bogus alias walk.
         } catch (IOException e) {
             throw new QueryException("Could not connect: " + e.getMessage(), -1,
                     SQLExceptionMapper.SQLStates.CONNECTION_EXCEPTION.getSqlState(), e);
         }
+    }
+
+    /**
+     * CT-2779: post-authentication setup, run once after the alias-retry loop.
+     * The cert and credentials are already accepted, so a failure here is a real
+     * error that must propagate - not a cert rejection to retry. That is why it
+     * lives outside {@code authenticate()} and outside the loop.
+     */
+    private void finishConnect() throws QueryException {
+        // Create the target database if requested, then switch to it
+        if (createDB()) {
+            executeQuery(new DrizzleQuery("CREATE DATABASE IF NOT EXISTS `" + this.database + "`"));
+            executeQuery(new DrizzleQuery("USE `" + this.database + "`"));
+        }
+        // Read max_allowed_packet from server
+        getMaxAllowedPacket();
+        connected = true;
     }
 
     private static SSLSocketFactory createSSLSocketFactoryFromCertificate(File crtFile)
