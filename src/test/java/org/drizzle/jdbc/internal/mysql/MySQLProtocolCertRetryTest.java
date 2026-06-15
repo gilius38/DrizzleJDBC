@@ -110,6 +110,38 @@ public class MySQLProtocolCertRetryTest {
         assertFalse(MySQLProtocol.isLateCertRejection(qe));
     }
 
+    // ---- isRetryableCertFailure: covers RuntimeException late rejections -----
+
+    /** A CONNECTION_EXCEPTION QueryException (transport break) => retry. */
+    @Test
+    public void connectionExceptionIsRetryable() {
+        QueryException qe = new QueryException("broken pipe", -1, CONN,
+                new SocketException("Broken pipe"));
+        assertTrue(MySQLProtocol.isRetryableCertFailure(qe));
+    }
+
+    /** A real auth error (non-08 QueryException, e.g. access denied) => propagate. */
+    @Test
+    public void authErrorIsNotRetryable() {
+        QueryException qe = new QueryException("Access denied for user 'foo'");
+        assertFalse(MySQLProtocol.isRetryableCertFailure(qe));
+    }
+
+    /** A torn-connection plugin/parse failure (RuntimeException) => retry. */
+    @Test
+    public void runtimeExceptionIsRetryable() {
+        assertTrue(MySQLProtocol.isRetryableCertFailure(
+                new RuntimeException("Bad public key format")));
+        assertTrue(MySQLProtocol.isRetryableCertFailure(
+                new ArrayIndexOutOfBoundsException("truncated packet")));
+    }
+
+    /** An Error is not a retryable cert failure. */
+    @Test
+    public void errorIsNotRetryable() {
+        assertFalse(MySQLProtocol.isRetryableCertFailure(new StackOverflowError()));
+    }
+
     // ---- hasAnotherAliasToTry: rethrow-vs-retry exhaustion boundary ---------
 
     /** Keystore configured but not yet loaded (first, default-alias attempt). */

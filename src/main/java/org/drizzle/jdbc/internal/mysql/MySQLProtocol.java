@@ -187,6 +187,15 @@ public class MySQLProtocol implements Protocol {
         boolean retry = false;
         String previousAlias = null;
 
+        // CT-2779: keystore / trust-store properties for the alias walk. They do
+        // not change during a connect, so read them once here instead of on every
+        // retry iteration and every (incl. non-cert) auth failure.
+        final String keyStorePath = System.getProperty(KEYSTORE_PROP);
+        final String trustStorePath = System.getProperty(TRUSTSTORE_PROP);
+        final char[] keyStorePassword = toPassword(System.getProperty(KEYSTORE_PASSWORD_PROP));
+        final char[] trustStorePassword = toPassword(System.getProperty(TRUSTSTORE_PASSWORD_PROP));
+        final boolean keystoreConfigured = keyStorePath != null;
+
         // Provide a way to enable a given set of SSL protocols through
         // comma-no-space list in the URL parameter
         String[] enabledProtocols = new String[] { "TLSv1.3", "TLSv1.2", "TLSv1.1", "TLSv1" };
@@ -224,12 +233,17 @@ public class MySQLProtocol implements Protocol {
                             try {
                                 authenticate(greetingPacket, capabilities, packetSeq);
                                 aliasWorks = true;
-                            } catch (QueryException qe) {
-                                boolean moreAliasesToTry = hasAnotherAliasToTry(
-                                        aliases, System.getProperty(KEYSTORE_PROP) != null);
-                                // not a cert break, or no alias left: surface it
-                                if (!(isLateCertRejection(qe) && moreAliasesToTry))
-                                    throw qe;
+                            } catch (RuntimeException | QueryException e) {
+                                // A late TLS 1.3 cert rejection can surface as a
+                                // CONNECTION_EXCEPTION QueryException (transport
+                                // break) OR, when the server tears the connection
+                                // mid auth-plugin exchange, as a RuntimeException
+                                // (truncated-packet parse / plugin error). Retry
+                                // the next alias for either; a real auth/DB error
+                                // (other SQL state) is surfaced.
+                                if (!(isRetryableCertFailure(e) && hasAnotherAliasToTry(
+                                        aliases, keystoreConfigured)))
+                                    throw e;
                                 if (log.isLoggable(Level.FINE))
                                     log.fine("Auth broke right after the TLS handshake"
                                             + (sslSocketFactory == null
@@ -249,30 +263,26 @@ public class MySQLProtocol implements Protocol {
                             closeSocketQuietly();
                             // load keystore to get the aliases, only once
                             if (keyStore == null) {
-                                String keyStorePath = System.getProperty(KEYSTORE_PROP);
-                                String trustStorePath = System.getProperty(TRUSTSTORE_PROP);
                                 // CT-2779: clear error instead of FileInputStream(null) NPE
                                 requireAliasKeystorePaths(keyStorePath, trustStorePath);
-                                // passwords optional: null is accepted, a wrong one
-                                // surfaces through the catch below
-                                char[] keyStorePassword = toPassword(
-                                        System.getProperty(KEYSTORE_PASSWORD_PROP));
-                                char[] trustStorePassword = toPassword(
-                                        System.getProperty(TRUSTSTORE_PASSWORD_PROP));
                                 try {
                                     // both key and trust stores will be needed to init the ssl context
                                     KeyManagerFactory kmFact = KeyManagerFactory
                                             .getInstance(KeyManagerFactory.getDefaultAlgorithm());
                                     keyStore = KeyStore.getInstance("jks");
-                                    FileInputStream fis = new FileInputStream(keyStorePath);
-                                    keyStore.load(fis, keyStorePassword);
+                                    // CT-2779: try-with-resources so the keystore
+                                    // and truststore streams are closed (no FD leak)
+                                    try (FileInputStream fis = new FileInputStream(keyStorePath)) {
+                                        keyStore.load(fis, keyStorePassword);
+                                    }
                                     kmFact.init(keyStore, keyStorePassword);
                                     keyManagers = kmFact.getKeyManagers();
                                     TrustManagerFactory tmFact = TrustManagerFactory
                                             .getInstance(TrustManagerFactory.getDefaultAlgorithm());
                                     KeyStore ts = KeyStore.getInstance("jks");
-                                    fis = new FileInputStream(trustStorePath);
-                                    ts.load(fis, trustStorePassword);
+                                    try (FileInputStream tfis = new FileInputStream(trustStorePath)) {
+                                        ts.load(tfis, trustStorePassword);
+                                    }
                                     tmFact.init(ts);
                                     trustManagers = tmFact.getTrustManagers();
                                     aliases = keyStore.aliases();
@@ -310,7 +320,7 @@ public class MySQLProtocol implements Protocol {
                                 sslSocketFactory = context.getSocketFactory();
                             } catch (NoSuchAlgorithmException | KeyManagementException e) {
                                 throw new QueryException("Could not load key store "
-                                        + System.getProperty(KEYSTORE_PROP) + e.getLocalizedMessage());
+                                        + keyStorePath + e.getLocalizedMessage());
                             }
                         } /* !sslConnectSuccessful */
                     } catch (IOException e) {
@@ -345,17 +355,36 @@ public class MySQLProtocol implements Protocol {
     }
 
     /**
-     * CT-2779: is a post-handshake auth failure a late TLS 1.3 client-cert
-     * rejection that another keystore alias might fix? Such a rejection isn't
-     * reported by {@code startHandshake()}; it breaks the transport (the initial
-     * auth packet or a caching_sha2/sha256 plugin exchange), and
-     * {@code authenticate()}'s {@code catch (IOException)} tags it
-     * {@code CONNECTION_EXCEPTION} ("08"). A real auth error (server ERROR packet)
-     * or a plugin {@code RuntimeException} is not "08", so it is not retried -
-     * another cert cannot fix it.
+     * CT-2779: should a post-handshake auth failure be retried on the next
+     * keystore alias? A late TLS 1.3 client-cert rejection isn't reported by
+     * {@code startHandshake()}; it breaks the transport and surfaces either as a
+     * {@code CONNECTION_EXCEPTION} {@link QueryException} (a broken pipe / late
+     * alert funnelled through {@code authenticate()}'s {@code catch (IOException)}
+     * - see {@link #isLateCertRejection}) OR, when the server tears the
+     * connection mid caching_sha2/sha256 plugin exchange, as a
+     * {@link RuntimeException} (truncated-packet parse / plugin error). Both can
+     * be fixed by trying a different alias. A genuine auth/DB error is a
+     * {@code QueryException} with another SQL state (e.g. an access-denied ERROR
+     * packet) and is NOT retried - another cert cannot fix it.
+     *
+     * @param t the throwable from the post-handshake auth exchange
+     * @return true if a different alias might fix it
+     */
+    static boolean isRetryableCertFailure(final Throwable t) {
+        if (t instanceof QueryException)
+            return isLateCertRejection((QueryException) t);
+        return t instanceof RuntimeException;
+    }
+
+    /**
+     * CT-2779: is a {@link QueryException} from the post-handshake auth exchange
+     * a connection-level break (which a different keystore alias might fix)?
+     * {@code authenticate()}'s {@code catch (IOException)} tags transport breaks
+     * with the {@code CONNECTION_EXCEPTION} ("08") SQL state; a real auth error
+     * carries another state.
      *
      * @param qe the exception thrown by the post-handshake auth exchange
-     * @return true if it is a connection-level break that another alias may fix
+     * @return true if it is a connection-level break
      */
     static boolean isLateCertRejection(final QueryException qe) {
         // exact "08" only (not the whole family) keeps the retry narrow;
