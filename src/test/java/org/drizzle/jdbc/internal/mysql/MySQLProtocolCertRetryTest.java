@@ -127,13 +127,22 @@ public class MySQLProtocolCertRetryTest {
         assertFalse(MySQLProtocol.isRetryableCertFailure(qe));
     }
 
-    /** A torn-connection plugin/parse failure (RuntimeException) => retry. */
+    /** A partial-packet parse on a torn TLS 1.3 connection => retry. */
     @Test
-    public void runtimeExceptionIsRetryable() {
-        assertTrue(MySQLProtocol.isRetryableCertFailure(
-                new RuntimeException("Bad public key format")));
+    public void truncatedPacketParseIsRetryable() {
         assertTrue(MySQLProtocol.isRetryableCertFailure(
                 new ArrayIndexOutOfBoundsException("truncated packet")));
+        assertTrue(MySQLProtocol.isRetryableCertFailure(
+                new java.nio.BufferUnderflowException()));
+    }
+
+    /** A plain / crypto RuntimeException (not cert-fixable) => propagate. */
+    @Test
+    public void plainRuntimeExceptionIsNotRetryable() {
+        assertFalse(MySQLProtocol.isRetryableCertFailure(
+                new RuntimeException("Bad public key format")));
+        assertFalse(MySQLProtocol.isRetryableCertFailure(
+                new IllegalStateException("unexpected auth state")));
     }
 
     /** An Error is not a retryable cert failure. */
